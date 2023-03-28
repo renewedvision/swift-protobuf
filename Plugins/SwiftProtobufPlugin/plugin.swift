@@ -115,7 +115,8 @@ struct SwiftProtobufPlugin {
     func createBuildCommands(
         pluginWorkDirectory: PackagePlugin.Path,
         sourceFiles: FileList,
-        tool: (String) throws -> PackagePlugin.PluginContext.Tool
+        tool: (String) throws -> PackagePlugin.PluginContext.Tool,
+        targetDirectory: Path
     ) throws -> [Command] {
         guard let configurationFilePath = sourceFiles.first(
             where: {
@@ -138,7 +139,13 @@ struct SwiftProtobufPlugin {
         let protocPath: Path
         if let configuredProtocPath = configuration.protocPath {
             // The user set the config path in the file. So let's take that
-            protocPath = Path(configuredProtocPath)
+            if configuredProtocPath.hasPrefix("/") {
+                // An absolute path has been provided
+                protocPath = Path(configuredProtocPath)
+            } else {
+                // Not an absolute path, assume it is relative to the target's directory
+                protocPath = targetDirectory.appending(subpath: configuredProtocPath)
+            }
         } else if let environmentPath = ProcessInfo.processInfo.environment["PROTOC_PATH"] {
             // The user set the env variable. So let's take that
             protocPath = Path(environmentPath)
@@ -258,7 +265,8 @@ extension SwiftProtobufPlugin: BuildToolPlugin {
         return try createBuildCommands(
             pluginWorkDirectory: context.pluginWorkDirectory,
             sourceFiles: swiftTarget.sourceFiles,
-            tool: context.tool
+            tool: context.tool,
+            targetDirectory: target.directory
         )
     }
 }
@@ -274,7 +282,8 @@ extension SwiftProtobufPlugin: XcodeBuildToolPlugin {
         return try createBuildCommands(
             pluginWorkDirectory: context.pluginWorkDirectory,
             sourceFiles: target.inputFiles,
-            tool: context.tool
+            tool: context.tool,
+            targetDirectory: context.xcodeProject.directory
         )
     }
 }
