@@ -213,21 +213,83 @@ struct SwiftProtobufPlugin {
 
         var inputFiles = [Path]()
         var outputFiles = [Path]()
+        var argFiles = [String]()
+
+        let protocRoot = protocPath.removingLastComponent().removingLastComponent()
+
+        func attributes(_ path: Path) -> [FileAttributeKey: Any]? {
+        	let path = (path.string as NSString).resolvingSymlinksInPath
+        	do {
+        		return try FileManager.default.attributesOfItem(atPath: path)
+        	} catch {
+        		return nil
+        	}
+        }
+
+        func needsToBuild(_ inAttributes: [FileAttributeKey: Any]?, _ outAttributes: [FileAttributeKey: Any]?) -> Bool {
+        	guard
+	        	let inDate = inAttributes?[.modificationDate] as? Date,
+	        	let outDate = outAttributes?[.modificationDate] as? Date
+	        else { return true }
+	        return inDate > outDate
+        }
+        
+        func needsToBuildForImports(_ path: Path, _ outAttributes: [FileAttributeKey: Any]?) -> Bool {
+            // if no output file then short circuit the check for imports
+            guard outAttributes?[.modificationDate] as? Date != nil else { return true }
+
+            do {
+                let url = URL(filePath: path.string)
+                let data = try Data(contentsOf: url)
+                let lines = String(decoding: data, as: UTF8.self).components(separatedBy: .newlines)
+                let imports = lines.compactMap { line -> String? in
+                    guard let match = try? #/^import "(?<name>.*)";.*/#.wholeMatch(in: line) else { return nil }
+                    return String(match.name)
+                }
+                if imports.contains(where: { name in
+                    if let inAttributes = attributes(path.removingLastComponent().appending(name)) {
+                        return needsToBuild(inAttributes, outAttributes)
+                    }
+                    if let inAttributes = attributes(protocRoot.appending("include").appending(name)) {
+                        return needsToBuild(inAttributes, outAttributes)
+                    }
+                    return true
+                }) {
+                    return true
+                }
+                return false
+            } catch {
+                return true
+            }
+        }
 
         for var file in invocation.protoFiles {
-            // Append the file to the protoc args so that it is used for generating
-            protocArgs.append("\(file)")
-            inputFiles.append(directory.appending(file))
-
+            let inName = file
+            let inFile = directory.appending(file)
             // The name of the output file is based on the name of the input file.
             // We validated in the beginning that every file has the suffix of .proto
             // This means we can just drop the last 5 elements and append the new suffix
             file.removeLast(5)
             file.append("pb.swift")
-            let protobufOutputPath = outputDirectory.appending(file)
+            let outFile = outputDirectory.appending(file)
+            let outAttributes = attributes(outFile)
+            if needsToBuild(attributes(inFile), outAttributes) || needsToBuildForImports(inFile, outAttributes) {
+                // Append the file to the protoc args so that it is used for generating
+	            argFiles.append("\(inName)")
+            }
+            inputFiles.append(inFile)
+
 
             // Add the outputPath as an output file
-            outputFiles.append(protobufOutputPath)
+            outputFiles.append(outFile)
+        }
+        
+        let ignFiles = invocation.protoFiles.filter { !argFiles.contains($0) }
+        if !argFiles.isEmpty {
+            print("building \(argFiles.joined(separator: ", "))")
+        }
+        if !ignFiles.isEmpty {
+            print("ignoring \(ignFiles.joined(separator: ", "))")
         }
 
         // Construct the command. Specifying the input and output paths lets the build
@@ -235,9 +297,9 @@ struct SwiftProtobufPlugin {
         // the rule engine in the build system.
         return Command.buildCommand(
             displayName: "Generating swift files from proto files",
-            executable: protocPath,
-            arguments: protocArgs,
-            inputFiles: inputFiles + [protocGenSwiftPath],
+            executable: argFiles.isEmpty ? Path("/usr/bin/true") : protocPath,
+            arguments:  protocArgs + argFiles,
+            inputFiles: inputFiles + [directory.appending(Self.configurationFileName), protocGenSwiftPath],
             outputFiles: outputFiles
         )
     }
